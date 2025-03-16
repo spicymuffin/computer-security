@@ -1,0 +1,25 @@
+INSERT KEY a 123
+TURN KEY a
+ENTER HOUSE luigi
+WHO'S INSIDE?
+INSERT KEY ben 123
+TURN KEY jenny
+ENTER HOUSE ben
+INSERT KEY ben 123
+TURN KEY jenny
+ENTER HOUSE ray
+INSERT KEY ben 123
+TURN KEY jenny
+ENTER HOUSE gg
+WHO'S INSIDE?
+LEAVE HOUSE ben
+CHANGE LOCKS luigi abc gay breh lol bbno$ it boy asjdadwjndakwjndu18321hkj21y3alkjsid82qjdaknd.ncjdiawhwhdewajead,sad.akjdoiajdoijwqdqjdkandkjadiawjdoajd;wajdjadiwajdowajda
+INSERT KEY ben 123
+TURN KEY ben
+WHO'S INSIDE?
+INSERT KEY ray gay
+TURN KEY oleg
+ENTER HOUSE donaldtrump
+WHO'S INSIDE?
+P
+
