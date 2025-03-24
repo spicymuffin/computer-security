@@ -1,0 +1,4 @@
+#define TOP_SECRET 0
+#define SECRET 1
+#define CONFIDENTIAL 2
+#define UNCLASSIFIED 3
