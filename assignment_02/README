@@ -1,0 +1,8 @@
+Luigi Cussigh
+2023148006
+
+My program heavily utilizes strtok to parse strings,
+A linked list to keep track of the people in the HOUSE
+A simple dynamic array thing to store keys
+All space for strings is allocated after figuring out the length of the string, when the space is required
+Lots of calls to strlen, unfortunately, since strtok and getline dont return length data
