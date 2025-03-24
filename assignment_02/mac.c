@@ -12,13 +12,52 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 
-#define DEBUG 1
+#define DEBUG 0
 
 typedef struct user_access_level
 {
     char* name;
     int name_len;
 } user_access_level;
+
+typedef struct id_data
+{
+    uid_t ruid;
+    uid_t euid;
+    gid_t rgid;
+    gid_t egid;
+
+    struct passwd* pw;
+} id_data;
+
+id_data idd;
+
+void init_id_data()
+{
+    idd.ruid = getuid();
+    idd.euid = geteuid();
+    idd.rgid = getgid();
+    idd.egid = getegid();
+    idd.pw = getpwuid(idd.ruid);
+}
+
+int drop_privileges()
+{
+    if (seteuid(idd.ruid) == -1)
+    {
+        fprintf(stderr, "drop privileges: setuid failed\n");
+        return 1;
+    }
+
+    if (setegid(idd.rgid) == -1)
+    {
+        fprintf(stderr, "drop privileges: setgid failed\n");
+        return 1;
+    }
+
+    return 0;
+}
+
 
 void destroy_access_level(user_access_level* al)
 {
@@ -125,7 +164,12 @@ void mac_policy_init(mac_policy* policy)
         dynamic_array_push(policy->access_levels[tmp_level], &al);
 
         free(line);
+        line = NULL;
     }
+
+    free(line);
+    line = NULL;
+    fclose(file);
 }
 
 int map_filename_to_access_level(mac_policy* policy, char* filename)
@@ -222,8 +266,8 @@ int write_to_log(char* username, size_t username_len, char* operation, char* fil
     char* log_filename = malloc(username_len + 5);
     snprintf(log_filename, username_len + 5, "%s.log", username);
 
-    /// TODO: is this right
-    umask(0137);  // ensures file is created with 0640 (rw-r-----)
+    /// TODO: is this right even
+    umask(0137);  // ensures file is created with at most 0640 (rw-r-----)
 
     int fd = open(log_filename, O_WRONLY | O_CREAT | O_APPEND, 0640);
     if (fd == -1)
@@ -243,11 +287,24 @@ int write_to_log(char* username, size_t username_len, char* operation, char* fil
 
 void write_file(mac_policy* policy, char* username, size_t username_len, char* filename, char* message)
 {
+    int file_access_level = map_filename_to_access_level(policy, filename);
+    if (file_access_level == -1)
+    {
+        fprintf(stderr, "write: invalid filename\n");
+        destroy_mac_policy(policy);
+        exit(1);
+    }
+
     // check authority to write the file
-    int auth = check_write_authority(policy, username, username_len, map_filename_to_access_level(policy, filename));
+    int auth = check_write_authority(policy, username, username_len, file_access_level);
 
     if (!auth)
     {
+        if (drop_privileges())
+        {
+            fprintf(stderr, "drop privileges: failed\n");
+        }
+
         printf("ACCESS DENIED\n");
 
         // log the command
@@ -269,10 +326,16 @@ void write_file(mac_policy* policy, char* username, size_t username_len, char* f
         exit(1);
     }
 
-    // write the operation to the file
+    // write the message to the file
     dprintf(fd, "%s\n", message);
     fsync(fd);
     close(fd);
+
+    if (drop_privileges())
+    {
+        destroy_mac_policy(policy);
+        exit(1);
+    }
 
     // log the command
     if (write_to_log(username, username_len, "write", filename))
@@ -285,11 +348,24 @@ void write_file(mac_policy* policy, char* username, size_t username_len, char* f
 
 void read_file(mac_policy* policy, char* username, size_t username_len, char* filename)
 {
+    int file_access_level = map_filename_to_access_level(policy, filename);
+    if (file_access_level == -1)
+    {
+        fprintf(stderr, "write: invalid filename\n");
+        destroy_mac_policy(policy);
+        exit(1);
+    }
+
     // check authority to read the file
-    int auth = check_read_authority(policy, username, username_len, map_filename_to_access_level(policy, filename));
+    int auth = check_read_authority(policy, username, username_len, file_access_level);
 
     if (!auth)
     {
+        if (drop_privileges())
+        {
+            fprintf(stderr, "drop privileges: failed\n");
+        }
+
         printf("ACCESS DENIED\n");
 
         // log the command
@@ -316,8 +392,13 @@ void read_file(mac_policy* policy, char* username, size_t username_len, char* fi
         fputs(buffer, stdout);
     }
     fclose(file);
-
     printf("\n");
+
+    if (drop_privileges())
+    {
+        destroy_mac_policy(policy);
+        exit(1);
+    }
 
     // log the command
     if (write_to_log(username, username_len, "read", filename))
@@ -334,32 +415,26 @@ int main(int argc, char* argv[])
     mac_policy policy;
     mac_policy_init(&policy);
 
-    uid_t ruid = getuid();        // Real UID
-    uid_t euid = geteuid();       // Effective UID
-    gid_t rgid = getgid();        // Real GID
-    gid_t egid = getegid();       // Effective GID
-
-    struct passwd* pw = getpwuid(ruid); // You can also use euid here, depending on need
-
-    print_mac_policy(&policy);
+    init_id_data();
 
     #if DEBUG
-    if (pw != NULL)
+    print_mac_policy(&policy);
+    if (idd.pw != NULL)
     {
-        printf("username: %s\n", pw->pw_name);
+        printf("username: %s\n", idd.pw->pw_name);
     }
     #endif
 
-    size_t username_len = strlen(pw->pw_name);
+    size_t username_len = strlen(idd.pw->pw_name);
     char* username = malloc(username_len + 1);
-    strncpy(username, pw->pw_name, username_len);
+    strncpy(username, idd.pw->pw_name, username_len);
     username[username_len] = '\0';
 
     #if DEBUG
-    printf("real UID: %d\n", ruid);
-    printf("effective UID: %d\n", euid);
-    printf("real GID: %d\n", rgid);
-    printf("effective GID: %d\n", egid);
+    printf("real UID: %d\n", idd.ruid);
+    printf("effective UID: %d\n", idd.euid);
+    printf("real GID: %d\n", idd.rgid);
+    printf("effective GID: %d\n", idd.egid);
     #endif
 
     // parse command line arguments
@@ -371,12 +446,12 @@ int main(int argc, char* argv[])
     }
     else if (strcmp(argv[1], "read") == 0 && strlen(argv[1]) == 4)
     {
-        // read file
+        // read to file
         read_file(&policy, username, username_len, argv[2]);
     }
     else if (argc >= 4 && strcmp(argv[1], "write") == 0 && strlen(argv[1]) == 5)
     {
-        // write file
+        // write to file
         write_file(&policy, username, username_len, argv[2], argv[3]);
     }
     else
@@ -386,8 +461,8 @@ int main(int argc, char* argv[])
         exit(1);
     }
 
-    // drop root privileges by using setuid, seteuid, setgid, setegid
-
+    destroy_mac_policy(&policy);
+    free(username);
 
     return 0;
 }
