@@ -1,8 +1,11 @@
 Luigi Cussigh
 2023148006
 
-My program heavily utilizes strtok to parse strings,
-A linked list to keep track of the people in the HOUSE
-A simple dynamic array thing to store keys
-All space for strings is allocated after figuring out the length of the string, when the space is required
-Lots of calls to strlen, unfortunately, since strtok and getline dont return length data
+My program is designed to enforce Mandatory Access Control (MAC) for different security levels of document access. Here’s how I structured it:
+
+I use `strtok` to parse the `mac.policy` file. This extracts usernames and their security levels efficiently
+It utilizes a dynamic array to manage security levels, making access checks straightforward and efficient
+Memory for strings is allocated precisely when needed, ensuring efficient use of resources
+I relied on `strlen` quite a bit throughout the program to manage string operations, due to the limitations of `strtok` and `getline` which do not provide length data
+
+This implementation ensures strict adherence to the specified MAC protocols, regulating file access based on user security clearance effectively
