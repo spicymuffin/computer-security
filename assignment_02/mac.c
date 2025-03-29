@@ -285,14 +285,13 @@ int write_to_log(char* username, size_t username_len, char* operation, char* fil
     return 0;
 }
 
-void write_file(mac_policy* policy, char* username, size_t username_len, char* filename, char* message)
+int write_file(mac_policy* policy, char* username, size_t username_len, char* filename, char* message)
 {
     int file_access_level = map_filename_to_access_level(policy, filename);
     if (file_access_level == -1)
     {
         fprintf(stderr, "write: invalid filename\n");
-        destroy_mac_policy(policy);
-        exit(1);
+        return 1;
     }
 
     // check authority to write the file
@@ -303,6 +302,7 @@ void write_file(mac_policy* policy, char* username, size_t username_len, char* f
         if (drop_privileges())
         {
             fprintf(stderr, "drop privileges: failed\n");
+            return 1;
         }
 
         printf("ACCESS DENIED\n");
@@ -311,10 +311,10 @@ void write_file(mac_policy* policy, char* username, size_t username_len, char* f
         if (write_to_log(username, username_len, "write", filename))
         {
             fprintf(stderr, "log write: failed\n");
+            return 1;
         }
 
-        destroy_mac_policy(policy);
-        exit(1);
+        return 126;
     }
 
     // open the file for appending (assumed to exist)
@@ -322,8 +322,7 @@ void write_file(mac_policy* policy, char* username, size_t username_len, char* f
     if (fd == -1)
     {
         fprintf(stderr, "write: open failed\n");
-        destroy_mac_policy(policy);
-        exit(1);
+        return 1;
     }
 
     // write the message to the file
@@ -333,27 +332,26 @@ void write_file(mac_policy* policy, char* username, size_t username_len, char* f
 
     if (drop_privileges())
     {
-        destroy_mac_policy(policy);
-        exit(1);
+        return 1;
     }
 
     // log the command
     if (write_to_log(username, username_len, "write", filename))
     {
-        destroy_mac_policy(policy);
         fprintf(stderr, "log write: failed\n");
-        exit(1);
+        return 1;
     }
+
+    return 0;
 }
 
-void read_file(mac_policy* policy, char* username, size_t username_len, char* filename)
+int read_file(mac_policy* policy, char* username, size_t username_len, char* filename)
 {
     int file_access_level = map_filename_to_access_level(policy, filename);
     if (file_access_level == -1)
     {
-        fprintf(stderr, "write: invalid filename\n");
-        destroy_mac_policy(policy);
-        exit(1);
+        fprintf(stderr, "read: invalid filename\n");
+        return 1;
     }
 
     // check authority to read the file
@@ -364,6 +362,7 @@ void read_file(mac_policy* policy, char* username, size_t username_len, char* fi
         if (drop_privileges())
         {
             fprintf(stderr, "drop privileges: failed\n");
+            return 1;
         }
 
         printf("ACCESS DENIED\n");
@@ -372,18 +371,17 @@ void read_file(mac_policy* policy, char* username, size_t username_len, char* fi
         if (write_to_log(username, username_len, "read", filename))
         {
             fprintf(stderr, "log write: failed\n");
+            return 1;
         }
 
-        destroy_mac_policy(policy);
-        exit(1);
+        return 126;
     }
 
     FILE* file = fopen(filename, "r");
     if (file == NULL)
     {
         fprintf(stderr, "read: open failed\n");
-        destroy_mac_policy(policy);
-        exit(1);
+        return 1;
     }
 
     char buffer[1024];
@@ -396,17 +394,17 @@ void read_file(mac_policy* policy, char* username, size_t username_len, char* fi
 
     if (drop_privileges())
     {
-        destroy_mac_policy(policy);
-        exit(1);
+        return 1;
     }
 
     // log the command
     if (write_to_log(username, username_len, "read", filename))
     {
-        destroy_mac_policy(policy);
         fprintf(stderr, "log write: failed\n");
-        exit(1);
+        return 1;
     }
+
+    return 0;
 }
 
 int main(int argc, char* argv[])
@@ -437,32 +435,41 @@ int main(int argc, char* argv[])
     printf("effective GID: %d\n", idd.egid);
     #endif
 
+    int errno = -1;
+
     // parse command line arguments
     if (argc < 3)
     {
         fprintf(stderr, "usage: %s read/write args...\n", argv[0]);
-        destroy_mac_policy(&policy);
-        exit(2);
+        errno = 2;
     }
     else if (strcmp(argv[1], "read") == 0 && strlen(argv[1]) == 4)
     {
         // read to file
-        read_file(&policy, username, username_len, argv[2]);
+        errno = read_file(&policy, username, username_len, argv[2]);
+        if (errno == 1)
+        {
+            fprintf(stderr, "read: failed\n");
+        }
     }
     else if (argc >= 4 && strcmp(argv[1], "write") == 0 && strlen(argv[1]) == 5)
     {
         // write to file
-        write_file(&policy, username, username_len, argv[2], argv[3]);
+        errno = write_file(&policy, username, username_len, argv[2], argv[3]);
+        if (errno == 1)
+        {
+            fprintf(stderr, "write: failed\n");
+        }
     }
     else
     {
         fprintf(stderr, "invalid command\n");
-        destroy_mac_policy(&policy);
-        exit(1);
+        errno = 2;
     }
 
     destroy_mac_policy(&policy);
     free(username);
+    exit(errno);
 
     return 0;
 }
