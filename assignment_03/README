@@ -1,0 +1,15 @@
+Luigi Cussigh
+2023148006
+
+I used EVP_BytesToKey bc i noticed that for small shared.key values the function EVP_EncryptInit_ex
+behaved in a weird way
+
+The thing isnt using streamed reads and writes so if the file is big it IS going to run out of random
+It uses the same 32 byte key for AES512-CTR and HMAC-SHA256 which is bad ig but i cba at this point
+
+the HMAC tag is calculated on ciphertext+IV so IV cant be tampered with (i missed that at first, actually)
+
+dbgutil is for dynamic debugging toggling
+fileutil does the file operations
+
+make run to test quick
