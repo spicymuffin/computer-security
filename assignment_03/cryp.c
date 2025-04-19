@@ -46,7 +46,7 @@ int do_encrypt(
     int ret = 2;
 
 
-    // derive AES/HMAC key and IV from the key material
+    // derive AES/HMAC key from the key material
     int n = EVP_BytesToKey(
         EVP_aes_256_ctr(),   // cipher whose key-size we want
         EVP_sha256(),        // digest to expand the bytes
@@ -55,8 +55,15 @@ int do_encrypt(
         key_material_len,    // length of pass-phrase
         1,                   // iteration count 1 bc we dont need to slow this down for fun this is just to get 32 byte keys
         derived_key,         // OUT: AES-256 key
-        iv                   // OUT: 16-byte IV
+        NULL                 // do not generate IV deterministically
     );
+
+    // generate a random IV
+    if (RAND_bytes(iv, IV_LEN) != 1)
+    {
+        handle_openssl_error("failed to generate IV");
+        goto cleanup;
+    }
 
     // check the length of the derived key
     // this should be 32 bytes for AES-256
@@ -254,7 +261,7 @@ int do_decrypt(
     ciphertext_data = ciphertext_with_iv + IV_LEN;
     ciphertext_len = ciphertext_with_iv_len - IV_LEN;
 
-    // derive AES/HMAC key and IV from the key material
+    // derive AES/HMAC key from the key material
     int n = EVP_BytesToKey(
         EVP_aes_256_ctr(),   // cipher whose key-size we want
         EVP_sha256(),        // digest to expand the bytes
@@ -263,7 +270,7 @@ int do_decrypt(
         key_material_len,    // length of pass-phrase
         1,                   // iteration count 1 bc we dont need to slow this down for fun this is just to get 32 byte keys
         derived_key,         // OUT: AES-256 key
-        iv                   // OUT: 16-byte IV
+        NULL                 // do not generate IV deterministically, use iv in ciphertext_with_iv
     );
 
     // check the length of the derived key
