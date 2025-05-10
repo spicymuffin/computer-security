@@ -1,5 +1,5 @@
 main: signtool.c signtool.h dbgutil.c fileutil.c
-	gcc -Wall -o signtool signtool.c -lssl -lcrypto
+	gcc -Wall -o signtool signtool.c dbgutil.c fileutil.c -lssl -lcrypto -lelf
 clean:
 	rm -f
 	rm -f signtool
