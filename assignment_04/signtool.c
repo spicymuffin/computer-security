@@ -17,6 +17,31 @@
 
 extern int debug;
 
+
+Elf_Scn* find_section_by_name(Elf *elf, const char *target_name) {
+    if (!elf || !target_name) return NULL;
+
+    size_t shstrndx;
+    if (elf_getshdrstrndx(elf, &shstrndx) < 0) {
+        dbg_perror("find_section_by_name failed: elf_getshdrstrndx: %s", elf_errmsg(-1));
+        return NULL;
+    }
+
+    Elf_Scn *scn = NULL;
+    while ((scn = elf_nextscn(elf, scn)) != NULL) {
+        GElf_Shdr shdr;
+        if (gelf_getshdr(scn, &shdr) != &shdr)
+            continue;
+
+        const char *name = elf_strptr(elf, shstrndx, shdr.sh_name);
+        if (name && strcmp(name, target_name) == 0) {
+            return scn; // found
+        }
+    }
+
+    return NULL; // section not found
+}
+
 // the executable is read into md,
 // the length of the md is mdlen
 // signing_key is initialized with the private key
@@ -209,8 +234,9 @@ int main(int argc, char* argv[])
     {
         error_code = -1; // elf file not modified
 
-        // read key
         EVP_PKEY* signing_key = NULL;
+
+        // read key
         if ((tmp = read_key(arg_key, 1, &signing_key)) != 0)
         {
             dbg_perror("read_key failed: code %d, reading %s", tmp, arg_key);
