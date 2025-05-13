@@ -5,3 +5,5 @@ assignment_02/*.data
 mac.policy
 cryp
 signtool
+test_executable
+test_executable-signed

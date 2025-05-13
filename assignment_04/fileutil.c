@@ -1,6 +1,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <errno.h>
 
 #include "dbgutil.h"
 #include "fileutil.h"
@@ -50,6 +55,49 @@ long read_file(const char* filename, unsigned char** buffer)
     return filelen;
 }
 
+long read_file_fd(int fd, unsigned char** buffer)
+{
+    struct stat st;
+    long filelen;
+
+    // Get file size
+    if (fstat(fd, &st) != 0)
+    {
+        dbg_perror("fstat failed: %s", strerror(errno));
+        return -1;
+    }
+
+    filelen = st.st_size;
+
+    // Allocate buffer
+    *buffer = (unsigned char*)malloc((size_t)filelen);
+    if (*buffer == NULL)
+    {
+        dbg_perror("malloc failed: %s", strerror(errno));
+        return -1;
+    }
+
+    // Read file content
+    ssize_t total_read = 0;
+    while (total_read < filelen)
+    {
+        ssize_t bytes = read(fd, *buffer + total_read, filelen - total_read);
+        if (bytes < 0)
+        {
+            dbg_perror("read failed: %s", strerror(errno));
+            free(*buffer);
+            return -1;
+        }
+        if (bytes == 0)
+        {
+            break;  // EOF
+        }
+        total_read += bytes;
+    }
+
+    return filelen;
+}
+
 long read_file_max_n_chars(const char* filename, unsigned char* buffer, size_t n)
 {
     FILE* fileptr;
@@ -91,4 +139,46 @@ int write_file(const char* filename, const unsigned char* buffer, size_t length)
     fclose(fileptr);
 
     return 0;
+}
+
+int copy_file(const char* src, const char* dst)
+{
+    int in_fd = open(src, O_RDONLY);
+    if (in_fd < 0)
+    {
+        dbg_perror("copy_file: open src failed: %s", src);
+        return -1;
+    }
+
+    int out_fd = open(dst, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (out_fd < 0)
+    {
+        dbg_perror("copy_file: open dst failed: %s", dst);
+        close(in_fd);
+        return -1;
+    }
+
+    char buf[4096];
+    ssize_t bytes_read, bytes_written;
+
+    while ((bytes_read = read(in_fd, buf, sizeof(buf))) > 0)
+    {
+        bytes_written = write(out_fd, buf, bytes_read);
+        if (bytes_written != bytes_read)
+        {
+            dbg_perror("copy_file: write failed");
+            close(in_fd);
+            close(out_fd);
+            return -1;
+        }
+    }
+
+    if (bytes_read < 0)
+    {
+        dbg_perror("copy_file: read failed");
+    }
+
+    close(in_fd);
+    close(out_fd);
+    return (bytes_read < 0) ? -1 : 0;
 }

@@ -7,6 +7,10 @@
 
 #define SIGNATURE_LEN 256
 #define SIGNATURE_SECTION_NAME ".signature"
+#define SIGNATURE_POSTFIX "-signed"
+
+#define TMP_FILE_PATH "/tmp/signtool-tmp-file-XXXXXX"
+
 enum mode
 {
     SIGN = 0,
