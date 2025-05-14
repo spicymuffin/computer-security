@@ -22,3 +22,6 @@ keygen:
 	rm -f private_key.pem public_key.pem
 	echo "generating key pair"
 	bash keygen.sh
+
+licensechk:
+	echo "licensechk"

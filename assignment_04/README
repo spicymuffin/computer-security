@@ -1,0 +1,12 @@
+Luigi Cussigh
+2023148006
+
+It does use objcopy to add/update sections.
+The signature creation algorithm is just concatenating all the execuatable sections with SHF_EXECINSTR flag in
+executable segments (with PF_X set).
+To do the actual signing I used RSA with SHA-256, as implemented by OpenSSL's EVP interface. (RSASSA-PKCS1-v1_5 + SHA-256)
+Verification is done in the same way.
+I modified cas4109.c because it didnt support updating signatures.
+
+To solve part B i had to modify the .rela.dyn's entry with offset 0x4010 to 0x130b (which is the address of do_nothing).
+We have to go through .rela.dyn and not through .data because this elf file was compiled with -fPIE.

@@ -424,7 +424,7 @@ int sign_elf(const char* elf_file, const char* key_file)
 
     // singing_key is initialized with the private key here
 
-    elf = elf_begin(fd, ELF_C_RDWR, NULL);
+    elf = elf_begin(fd, ELF_C_READ, NULL);
 
     // collect executable sections
     size_t sections_count = 0;
@@ -473,7 +473,20 @@ int sign_elf(const char* elf_file, const char* key_file)
 
     dbg_pinfo("signature calculated");
 
-    if (add_section(elf_file, sig_buf, sig_buf_size) != 0)
+    int overwrite = 0;
+    // check whether the file is already signed
+    Elf_Scn* sig_scn = find_section_by_name(elf, SIGNATURE_SECTION_NAME);
+    if (sig_scn == NULL)
+    {
+        dbg_pinfo("signing: no .signature section found");
+    }
+    else
+    {
+        dbg_pinfo("signing: .signature section found");
+        overwrite = 1;
+    }
+
+    if (add_section(elf_file, sig_buf, sig_buf_size, overwrite) != 0)
     {
         dbg_perror("signing failed: add_section failed");
         goto sign_elf_cleanup;
@@ -525,7 +538,7 @@ int verify_elf(const char* elf_file, const char* key_file)
     }
 
     // check if the file is signed
-    elf = elf_begin(fd, ELF_C_RDWR, NULL);
+    elf = elf_begin(fd, ELF_C_READ, NULL);
     if (!elf)
     {
         dbg_perror("verifying failed: elf_begin failed: %s", elf_errmsg(-1));
@@ -729,7 +742,6 @@ int main(int argc, char* argv[])
         if (tmp == 0)
         {
             dbg_pinfo("signing succeeded");
-            printf(MSG_OK);
             exit_code = 0;
         }
         else
@@ -738,7 +750,6 @@ int main(int argc, char* argv[])
             exit_code = 1;
             goto err;
         }
-
     }
     else if (m == VERIFY)
     {

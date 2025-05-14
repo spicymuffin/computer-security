@@ -5,7 +5,7 @@
 
 #include "cas4109.h"
 
-int add_section(const char* infilepath, unsigned char* buf, size_t buf_len)
+int add_section(const char* infilepath, unsigned char* buf, size_t buf_len, int overwrite)
 {
     int ret = 0;
     char* outfilepath = NULL;
@@ -45,8 +45,14 @@ int add_section(const char* infilepath, unsigned char* buf, size_t buf_len)
     fclose(fp);
     fp = NULL;
 
-    ret = execlp("objcopy", "objcopy", "--add-section", ".signature=/tmp/signtool-sig", "--set-section-flags", ".signature=noload,readonly", infilepath, outfilepath, (char*)NULL);
-
+    if (overwrite)
+    {
+        ret = execlp("objcopy", "objcopy", "--update-section", ".signature=/tmp/signtool-sig", "--set-section-flags", ".signature=noload,readonly", infilepath, outfilepath, (char*)NULL);
+    }
+    else
+    {
+        ret = execlp("objcopy", "objcopy", "--add-section", ".signature=/tmp/signtool-sig", "--set-section-flags", ".signature=noload,readonly", infilepath, outfilepath, (char*)NULL);
+    }
 clean:
     if (outfilepath) free(outfilepath);
     if (fp) fclose(fp);
