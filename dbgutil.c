@@ -23,7 +23,7 @@ void dbg_pinfo(const char* format, ...)
 {
     if (debug == 0) return;
     va_list args;
-    fprintf(stderr, "[ INFO  ] ");
+    fprintf(stderr, "[  INFO ] ");
     va_start(args, format);
     vfprintf(stderr, format, args);
     va_end(args);

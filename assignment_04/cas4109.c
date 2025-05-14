@@ -5,7 +5,7 @@
 
 #include "cas4109.h"
 
-int add_section(char* infilepath, unsigned char* buf, size_t buf_len)
+int add_section(const char* infilepath, unsigned char* buf, size_t buf_len)
 {
     int ret = 0;
     char* outfilepath = NULL;

@@ -240,6 +240,7 @@ int collect_exec_sections(Elf* elf, struct range** out, size_t* out_count)
     struct range* segments = calloc(phnum, sizeof(*segments));
     if (!segments)
     {
+        dbg_perror("collect_exec_sections failed: malloc for segments");
         return -1;
     }
 
@@ -254,11 +255,14 @@ int collect_exec_sections(Elf* elf, struct range** out, size_t* out_count)
         }
     }
 
+    dbg_pinfo("collect_exec_sections: found %zu executable segments", segcnt);
+
     // collect sections that fall within those segments
     size_t cap = 16, count = 0;
     struct range* sections = malloc(cap * sizeof(*sections));
     if (!sections)
     {
+        dbg_perror("collect_exec_sections failed: malloc for sections");
         free(segments);
         return -1;
     }
@@ -269,6 +273,7 @@ int collect_exec_sections(Elf* elf, struct range** out, size_t* out_count)
         GElf_Shdr sh;
         if (!gelf_getshdr(scn, &sh))
         {
+            dbg_perror("collect_exec_sections failed: gelf_getshdr: %s", elf_errmsg(-1));
             free(sections);
             free(segments);
             return -1;
@@ -281,16 +286,36 @@ int collect_exec_sections(Elf* elf, struct range** out, size_t* out_count)
 
         for (size_t j = 0; j < segcnt; ++j)
         {
-            if (s_off >= segments[j].off &&
-                (s_off + s_size) <= (segments[j].off + segments[j].size))
+            dbg_pinfo("  seg[%zu] range %zu..%zu  section %zu..%zu flags=0x%llx",
+                j,
+                (size_t)segments[j].off,
+                (size_t)(segments[j].off + segments[j].size),
+                (size_t)s_off,
+                (size_t)(s_off + s_size),
+                (unsigned long long)sh.sh_flags);
+
+            size_t strndx;
+            elf_getshdrstrndx(elf, &strndx);
+            const char* name = elf_strptr(elf, strndx, sh.sh_name);
+
+            dbg_pinfo("sec %-12s off=%zu size=%zu flags=0x%llx",
+                name ? name : "<?>",
+                (size_t)s_off, (size_t)s_size,
+                (unsigned long long)sh.sh_flags);
+
+            if (s_off >= segments[j].off && (s_off + s_size) <= (segments[j].off + segments[j].size))
             {
+                dbg_pinfo("collect_exec_sections: found section %zu at offset %zu", j, s_off);
                 if (count == cap)
                 {
                     cap *= 2;
-                    sections = realloc(sections, cap * sizeof(*sections));
-                    if (!sections) return -1;
+                    struct range* tmp = realloc(sections, cap * sizeof * sections);
+                    if (!tmp) { free(sections); free(segments); return -1; }
+                    sections = tmp;
                 }
-                sections[count++] = (struct range){ .off = s_off, .size = s_size };
+                sections[count].off = s_off;
+                sections[count].size = s_size;
+                count++;
                 break;
             }
         }
@@ -298,6 +323,13 @@ int collect_exec_sections(Elf* elf, struct range** out, size_t* out_count)
 
     free(segments);
 
+    // if no sections were found, free the allocated memory and return -1
+    if (count == 0)
+    {
+        dbg_perror("collect_exec_sections failed: no executable sections found");
+        free(sections);
+        return -1;
+    }
     // sort by file offset for deterministic hashing
     qsort(sections, count, sizeof(*sections), compare_range);
 
@@ -357,6 +389,69 @@ int add_scn_name_to_shstrtab(Elf* e_copy, const char* scn_name, size_t* unsigned
     return 0;
 }
 
+int dump_sections(Elf* e, unsigned char** msg, size_t* msglen, struct range* sections, size_t sections_count)
+{
+    size_t tmp_msglen = 0;
+    unsigned char* tmp_msg = NULL;
+
+    for (size_t i = 0; i < sections_count; ++i)
+    {
+        tmp_msglen += sections[i].size;
+    }
+
+    tmp_msg = malloc(tmp_msglen);
+    if (!tmp_msg)
+    {
+        dbg_perror("dump sections failed: malloc for msg failed");
+        free(tmp_msg);
+        return -1;
+    }
+
+    size_t offset = 0;
+    for (size_t i = 0; i < sections_count; ++i)
+    {
+        Elf_Scn* scn = gelf_offscn(e, sections[i].off);
+        if (!scn)
+        {
+            dbg_perror("dump sections failed: elf_getscn failed: %s", elf_errmsg(-1));
+            free(tmp_msg);
+            return -1;
+        }
+        Elf_Data* data = elf_getdata(scn, NULL);
+        if (!data)
+        {
+            dbg_perror("dump sections failed: elf_getdata failed: %s", elf_errmsg(-1));
+            free(tmp_msg);
+            return -1;
+        }
+        memcpy(tmp_msg + offset, data->d_buf, sections[i].size);
+        offset += sections[i].size;
+    }
+
+    *msglen = tmp_msglen;
+    *msg = tmp_msg;
+
+    return 0;
+}
+
+static off_t
+get_next_free_offset(Elf* elf)
+{
+    Elf_Scn* scn = NULL;
+    GElf_Shdr   sh;
+    off_t       max_end = 0;
+
+    while ((scn = elf_nextscn(elf, scn)) != NULL)
+    {
+        if (gelf_getshdr(scn, &sh) != &sh)
+            continue;
+        off_t end = sh.sh_offset + sh.sh_size;
+        if (end > max_end)
+            max_end = end;
+    }
+    return max_end;
+}
+
 int create_signed_elf(const char* elf_file, const char* key_file)
 {
     // copied file
@@ -412,6 +507,8 @@ int create_signed_elf(const char* elf_file, const char* key_file)
     // singing_key is initialized with the private key here
 
     e_copy = elf_begin(copy_fd, ELF_C_RDWR, NULL);
+
+    elf_flagelf(e_copy, ELF_C_SET, ELF_F_LAYOUT);
 
     // now we need to start actually signing the file
     // first check if the section already exists
@@ -475,6 +572,8 @@ int create_signed_elf(const char* elf_file, const char* key_file)
     shdr.sh_type = SHT_PROGBITS;
     shdr.sh_flags = 0; // no need to load this section when runnning so we set it to 0
     shdr.sh_addralign = 1;
+    shdr.sh_offset = get_next_free_offset(e_copy); // offset in the file
+    shdr.sh_size = sig_size; // size of the section is the size of the signature
     gelf_update_shdr(sig_scn, &shdr);
 
     // sync the updated elf file with disk
@@ -500,42 +599,20 @@ int create_signed_elf(const char* elf_file, const char* key_file)
 
     dbg_pinfo("executable sections collected");
 
-    // dump sections into a contiguous buffer
-    size_t msglen = 0;
-    for (size_t i = 0; i < sections_count; ++i)
-    {
-        msglen += sections[i].size;
-    }
 
-    msg = malloc(msglen);
-    if (!msg)
+    size_t msglen = 0;
+    // dump sections into a contiguous buffer
+    if (dump_sections(e_copy, &msg, &msglen, sections, sections_count) != 0)
     {
-        dbg_perror("signing failed: malloc for msg failed");
+        dbg_perror("signing failed: dump_sections failed");
         goto create_signed_elf_cleanup;
     }
 
-    size_t offset = 0;
-    for (size_t i = 0; i < sections_count; ++i)
-    {
-        Elf_Scn* scn = elf_getscn(e_copy, sections[i].off);
-        if (!scn)
-        {
-            dbg_perror("signing failed: elf_getscn failed: %s", elf_errmsg(-1));
-            goto create_signed_elf_cleanup;
-        }
-        Elf_Data* data = elf_getdata(scn, NULL);
-        if (!data)
-        {
-            dbg_perror("signing failed: elf_getdata failed: %s", elf_errmsg(-1));
-            goto create_signed_elf_cleanup;
-        }
-        memcpy(msg + offset, data->d_buf, sections[i].size);
-        offset += sections[i].size;
-    }
+    dbg_pinfo("sections dumped into contiguous buffer");
 
     // calculate signature
     // do_sign will allocate sig_buf and set sig_buf_size to the size of the signature
-    if (do_sign(msg, (size_t)mdlen, signing_key, &sig_buf, &sig_buf_size) != 0)
+    if (do_sign(msg, msglen, signing_key, &sig_buf, &sig_buf_size) != 0)
     {
         dbg_perror("signing failed: do_sign failed");
         goto create_signed_elf_cleanup;
@@ -562,8 +639,7 @@ int create_signed_elf(const char* elf_file, const char* key_file)
     }
 
     dbg_pinfo("signature written to .signature section");
-    dbg_pinfo("signing succeeded");
-    status_code = 1;
+    status_code = 0;
 
 create_signed_elf_cleanup:
     if (signing_key) EVP_PKEY_free(signing_key);
@@ -678,13 +754,13 @@ int verify_elf(const char* elf_file, const char* key_file)
     {
         dbg_pinfo("verifying succeeded: signature is valid");
         printf(MSG_OK);
-        status_code = 0;
+        status_code = 0; // status code 0 means signature is valid
     }
     else if (result == 0)
     {
         dbg_pinfo("verifying succeeded: signature is invalid");
         printf(MSG_NOT_OK);
-        status_code = 1;
+        status_code = 1; // status code 1 means signature is invalid or signature section corrupted
     }
     else
     {
@@ -785,22 +861,52 @@ int main(int argc, char* argv[])
     if (m == SIGN)
     {
         tmp = create_signed_elf(arg_file, arg_key);
-        if (tmp != 0)
-        {
-            dbg_perror("signing failed: create_signed_elf failed: code %d", tmp);
-            exit_code = 1;
-            goto err;
-        }
-        else
+        if (tmp == 0)
         {
             dbg_pinfo("signing succeeded");
             printf(MSG_OK);
             exit_code = 0;
         }
+        else
+        {
+            dbg_perror("signing failed: create_signed_elf failed: code %d", tmp);
+            exit_code = 1;
+            goto err;
+        }
+
     }
     else if (m == VERIFY)
     {
-
+        tmp = verify_elf(arg_file, arg_key);
+        if (tmp == 0)
+        {
+            dbg_pinfo("verifying succeeded");
+            printf(MSG_OK);
+            exit_code = 0;
+        }
+        else if (tmp == 1)
+        {
+            dbg_pinfo("verifying succeeded: signature is invalid");
+            printf(MSG_NOT_OK);
+            exit_code = 1;
+        }
+        else if (tmp == 2)
+        {
+            dbg_pinfo("verifying succeeded: no .signature section");
+            printf(MSG_NOT_SIGNED);
+            exit_code = 2;
+        }
+        else
+        {
+            dbg_perror("verifying failed: verify_elf failed: code %d", tmp);
+            exit_code = 1;
+            goto err;
+        }
+    }
+    else
+    {
+        fprintf(stderr, "unknown mode: %s\n", argv[1]);
+        exit_code = 2;
     }
 
     exit_code = 0;
