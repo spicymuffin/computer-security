@@ -12,7 +12,7 @@ void dbg_perror(const char* format, ...)
 {
     if (debug == 0) return;
     va_list args;
-    fprintf(stderr, "err: ");
+    fprintf(stderr, "[ ERROR ] ");
     va_start(args, format);
     vfprintf(stderr, format, args);
     va_end(args);
@@ -23,7 +23,7 @@ void dbg_pinfo(const char* format, ...)
 {
     if (debug == 0) return;
     va_list args;
-    fprintf(stderr, "dbg: ");
+    fprintf(stderr, "[ INFO  ] ");
     va_start(args, format);
     vfprintf(stderr, format, args);
     va_end(args);

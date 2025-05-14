@@ -13,7 +13,6 @@
 
 #include "dbgutil.h"
 #include "signtool.h"
-#include "cas4109.h"
 #include "fileutil.h"
 
 extern int debug;
@@ -29,13 +28,13 @@ int hash_buffer_sha256(const unsigned char* buf, size_t len, unsigned char* out_
     EVP_MD_CTX* ctx = EVP_MD_CTX_new();
     if (!ctx) return -1;
 
-    if (EVP_DigestInit_ex(ctx, EVP_sha256(), NULL) != 1) goto done;
-    if (EVP_DigestUpdate(ctx, buf, len) != 1) goto done;
-    if (EVP_DigestFinal_ex(ctx, out_digest, out_len) != 1) goto done;
+    if (EVP_DigestInit_ex(ctx, EVP_sha256(), NULL) != 1) goto hash_buffer_sha256_cleanup;
+    if (EVP_DigestUpdate(ctx, buf, len) != 1) goto hash_buffer_sha256_cleanup;
+    if (EVP_DigestFinal_ex(ctx, out_digest, out_len) != 1) goto hash_buffer_sha256_cleanup;
 
     ret = 0;
 
-done:
+hash_buffer_sha256_cleanup:
     EVP_MD_CTX_free(ctx);
     return ret;
 }
@@ -221,6 +220,485 @@ read_key_cleanup:
     return return_code;
 }
 
+static int compare_range(const void* a, const void* b)
+{
+    const struct range* ra = a;
+    const struct range* rb = b;
+    if (ra->off > rb->off) return 1;
+    if (ra->off < rb->off) return -1;
+    return 0;
+}
+
+// collect_exec_sections
+// allocates an array of ranges that represent the sections
+int collect_exec_sections(Elf* elf, struct range** out, size_t* out_count)
+{
+    size_t phnum;
+    if (elf_getphdrnum(elf, &phnum) < 0) return -1;
+
+    // collect executable segments (PF_X)
+    struct range* segments = calloc(phnum, sizeof(*segments));
+    if (!segments)
+    {
+        return -1;
+    }
+
+    size_t segcnt = 0;
+    for (size_t i = 0; i < phnum; ++i)
+    {
+        GElf_Phdr ph;
+        if (!gelf_getphdr(elf, (int)i, &ph)) return -1;
+        if (ph.p_type == PT_LOAD && (ph.p_flags & PF_X))
+        {
+            segments[segcnt++] = (struct range){ .off = ph.p_offset, .size = ph.p_filesz };
+        }
+    }
+
+    // collect sections that fall within those segments
+    size_t cap = 16, count = 0;
+    struct range* sections = malloc(cap * sizeof(*sections));
+    if (!sections)
+    {
+        free(segments);
+        return -1;
+    }
+
+    Elf_Scn* scn = NULL;
+    while ((scn = elf_nextscn(elf, scn)) != NULL)
+    {
+        GElf_Shdr sh;
+        if (!gelf_getshdr(scn, &sh))
+        {
+            free(sections);
+            free(segments);
+            return -1;
+        }
+        if (!sh.sh_size) continue;
+        if (!(sh.sh_flags & SHF_EXECINSTR)) continue;
+
+        off_t s_off = sh.sh_offset;
+        size_t s_size = sh.sh_size;
+
+        for (size_t j = 0; j < segcnt; ++j)
+        {
+            if (s_off >= segments[j].off &&
+                (s_off + s_size) <= (segments[j].off + segments[j].size))
+            {
+                if (count == cap)
+                {
+                    cap *= 2;
+                    sections = realloc(sections, cap * sizeof(*sections));
+                    if (!sections) return -1;
+                }
+                sections[count++] = (struct range){ .off = s_off, .size = s_size };
+                break;
+            }
+        }
+    }
+
+    free(segments);
+
+    // sort by file offset for deterministic hashing
+    qsort(sections, count, sizeof(*sections), compare_range);
+
+    *out = sections;
+    *out_count = count;
+    return 0;
+}
+
+int add_scn_name_to_shstrtab(Elf* e_copy, const char* scn_name, size_t* unsigned_shstrtab_size)
+{
+    // update the shstrtab
+    size_t shstrtab_index = 0;
+
+    // get the section header string table index
+    if (elf_getshdrstrndx(e_copy, &shstrtab_index) != 0)
+    {
+        dbg_perror("signing failed: elf_getshstrndx failed: %s", elf_errmsg(-1));
+        return -1;
+    }
+
+    // get the section header string table
+    Elf_Scn* shstrtab_scn = elf_getscn(e_copy, shstrtab_index);
+    if (shstrtab_scn == NULL)
+    {
+        dbg_perror("signing failed: elf_getscn failed: %s", elf_errmsg(-1));
+        return -1;
+    }
+
+    // get the section header string table data
+    Elf_Data* shstrtab_data = elf_getdata(shstrtab_scn, NULL);
+    if (shstrtab_data == NULL)
+    {
+        dbg_perror("signing failed: elf_getdata failed: %s", elf_errmsg(-1));
+        return -1;
+    }
+
+    // get the size of the section header string table
+    *unsigned_shstrtab_size = shstrtab_data->d_size;
+
+    // set the name of the section header string table
+    size_t signature_scn_name_len = strlen(scn_name) + 1;
+
+    Elf_Data* signed_shstrtab_data = elf_newdata(shstrtab_scn);
+    if (signed_shstrtab_data == NULL)
+    {
+        dbg_perror("signing failed: elf_newdata failed: %s", elf_errmsg(-1));
+        return -1;
+    }
+
+    // update the section header string table
+    signed_shstrtab_data->d_align = 1;
+    signed_shstrtab_data->d_buf = (void*)scn_name;
+    signed_shstrtab_data->d_size = signature_scn_name_len;
+    signed_shstrtab_data->d_type = ELF_T_BYTE;
+    signed_shstrtab_data->d_version = EV_CURRENT;
+
+    return 0;
+}
+
+int create_signed_elf(const char* elf_file, const char* key_file)
+{
+    // copied file
+    char* copy_file_path = NULL;
+    Elf* e_copy = NULL;
+    int copy_fd = -1;
+
+    // buffer of the message to sign
+    unsigned char* msg = NULL;
+
+    // signing key
+    EVP_PKEY* signing_key = NULL;
+
+    // signature buffer
+    unsigned char* sig_buf = NULL;
+    size_t sig_buf_size = 0;
+
+    // buffer for the zeroed section
+    unsigned char* zero_buf = NULL;
+
+    struct range* sections = NULL;
+
+    int tmp = 0;
+
+    int status_code = 10; // elf file sign general error
+
+    // create a copy of the file we are going to sign
+    // this is the file we will be signing
+    copy_file_path = calloc(1, strlen(elf_file) + strlen(SIGNATURE_POSTFIX) + 1);
+    copy_file_path = strcpy(copy_file_path, elf_file);
+    copy_file_path = strcat(copy_file_path, SIGNATURE_POSTFIX);
+
+    if ((copy_file(elf_file, copy_file_path) != 0))
+    {
+        dbg_perror("signing failed: copy_file failed");
+        goto create_signed_elf_cleanup;
+    }
+
+    if ((copy_fd = open(copy_file_path, O_RDWR, 0)) < 0)
+    {
+        dbg_perror("signing failed: open failed: %s", copy_file_path);
+        goto create_signed_elf_cleanup;
+    }
+
+    // read key
+    if ((tmp = read_key(key_file, 1, &signing_key)) != 0)
+    {
+        dbg_perror("signing failed: read_key failed: code %d, reading %s", tmp, key_file);
+        status_code = 11; // read key failed
+        goto create_signed_elf_cleanup;
+    }
+
+    // singing_key is initialized with the private key here
+
+    e_copy = elf_begin(copy_fd, ELF_C_RDWR, NULL);
+
+    // now we need to start actually signing the file
+    // first check if the section already exists
+    Elf_Scn* sig_scn;
+    size_t sig_size = SIGNATURE_LEN;
+    sig_scn = find_section_by_name(e_copy, SIGNATURE_SECTION_NAME);
+
+    if (sig_scn == NULL)
+    {
+        sig_scn = elf_newscn(e_copy);
+        if (sig_scn == NULL)
+        {
+            dbg_perror("signing failed: elf_newscn failed: %s", elf_errmsg(-1));
+            goto create_signed_elf_cleanup;
+        }
+    }
+
+    // empty buf that will be used to create/populate the section
+    zero_buf = calloc(1, sig_size);
+    if (zero_buf == NULL)
+    {
+        dbg_perror("signing failed: calloc for zero buf failed");
+        goto create_signed_elf_cleanup;
+    }
+
+    Elf_Data* sig_data = elf_getdata(sig_scn, NULL);
+
+    if (sig_data == NULL || sig_data->d_size == 0)
+    {
+        if (sig_data == NULL)
+        {
+            // we created/loaded an in memory shdr, its data is non existent
+            sig_data = elf_newdata(sig_scn);
+            if (sig_data == NULL)
+            {
+                dbg_perror("signing failed: elf_newdata failed: %s", elf_errmsg(-1));
+                goto create_signed_elf_cleanup;
+            }
+        }
+
+        // section loaded/created. anyways set its parameters to what we need
+        sig_data->d_align = 1;              // alignment is 1 (we don't care)
+        sig_data->d_buf = zero_buf;         // data buffer
+        sig_data->d_size = sig_size;        // reserve space for signature
+        sig_data->d_type = ELF_T_BYTE;      // type is unsigned char
+        sig_data->d_version = EV_CURRENT;   // version is current
+    }
+
+    // add the section name to the shstrtab
+    size_t unsigned_shstrtab_size = 0;
+    if (add_scn_name_to_shstrtab(e_copy, SIGNATURE_SECTION_NAME, &unsigned_shstrtab_size) != 0)
+    {
+        dbg_perror("signing failed: add_scn_name_to_shstrtab failed");
+        goto create_signed_elf_cleanup;
+    }
+
+    // update the section header
+    GElf_Shdr shdr;
+    gelf_getshdr(sig_scn, &shdr);
+    shdr.sh_name = unsigned_shstrtab_size; // offset in the shstrtab = size of the original shstrtab
+    shdr.sh_type = SHT_PROGBITS;
+    shdr.sh_flags = 0; // no need to load this section when runnning so we set it to 0
+    shdr.sh_addralign = 1;
+    gelf_update_shdr(sig_scn, &shdr);
+
+    // sync the updated elf file with disk
+    if (elf_update(e_copy, ELF_C_WRITE) < 0)
+    {
+        dbg_perror("signing failed: elf_update failed: %s", elf_errmsg(-1));
+        goto create_signed_elf_cleanup;
+    }
+
+    dbg_pinfo("-signed executable file created and .sig section added");
+
+    // elf file modified, signature section+data allocated
+    // still general error
+    status_code = 20;
+
+    // collect executable sections
+    size_t sections_count = 0;
+    if (collect_exec_sections(e_copy, &sections, &sections_count) != 0)
+    {
+        dbg_perror("signing failed: collect_exec_sections failed");
+        goto create_signed_elf_cleanup;
+    }
+
+    dbg_pinfo("executable sections collected");
+
+    // dump sections into a contiguous buffer
+    size_t msglen = 0;
+    for (size_t i = 0; i < sections_count; ++i)
+    {
+        msglen += sections[i].size;
+    }
+
+    msg = malloc(msglen);
+    if (!msg)
+    {
+        dbg_perror("signing failed: malloc for msg failed");
+        goto create_signed_elf_cleanup;
+    }
+
+    size_t offset = 0;
+    for (size_t i = 0; i < sections_count; ++i)
+    {
+        Elf_Scn* scn = elf_getscn(e_copy, sections[i].off);
+        if (!scn)
+        {
+            dbg_perror("signing failed: elf_getscn failed: %s", elf_errmsg(-1));
+            goto create_signed_elf_cleanup;
+        }
+        Elf_Data* data = elf_getdata(scn, NULL);
+        if (!data)
+        {
+            dbg_perror("signing failed: elf_getdata failed: %s", elf_errmsg(-1));
+            goto create_signed_elf_cleanup;
+        }
+        memcpy(msg + offset, data->d_buf, sections[i].size);
+        offset += sections[i].size;
+    }
+
+    // calculate signature
+    // do_sign will allocate sig_buf and set sig_buf_size to the size of the signature
+    if (do_sign(msg, (size_t)mdlen, signing_key, &sig_buf, &sig_buf_size) != 0)
+    {
+        dbg_perror("signing failed: do_sign failed");
+        goto create_signed_elf_cleanup;
+    }
+
+    dbg_pinfo("signature calculated");
+
+    // assert that the signature is the same size as the section
+    if (sig_buf_size != SIGNATURE_LEN)
+    {
+        dbg_perror("signing failed: signature size is not %d", SIGNATURE_LEN);
+        goto create_signed_elf_cleanup;
+    }
+
+    // write signature to .signature section
+    // note: size of the signature is *unmodified*
+    sig_data->d_buf = sig_buf; // signature buffer
+
+    // update the elf file with the signature
+    if (elf_update(e_copy, ELF_C_WRITE) < 0)
+    {
+        dbg_perror("signing failed: elf_update failed: %s", elf_errmsg(-1));
+        goto create_signed_elf_cleanup;
+    }
+
+    dbg_pinfo("signature written to .signature section");
+    dbg_pinfo("signing succeeded");
+    status_code = 1;
+
+create_signed_elf_cleanup:
+    if (signing_key) EVP_PKEY_free(signing_key);
+    if (copy_file_path) free(copy_file_path);
+    if (sig_buf) OPENSSL_free(sig_buf);
+    if (zero_buf) free(zero_buf);
+    if (e_copy) elf_end(e_copy);
+    if (msg) free(msg);
+    if (sections) free(sections);
+    if (copy_fd != -1) close(copy_fd);
+    return status_code;
+}
+
+int verify_elf(const char* elf_file, const char* key_file)
+{
+    EVP_PKEY* verifying_key = NULL;
+    Elf* e_ro = NULL;
+    unsigned char* file_img = NULL;
+    int result = -1;
+    int fd = -1;
+    int status_code = 60; // elf file verify general error
+
+    // load public key
+    if (read_key(key_file, 0, &verifying_key) != 0)
+    {
+        dbg_perror("verifying failed: read_key");
+        goto verify_cleanup;
+    }
+
+    // open executable read-only, map with libelf
+    if ((fd = open(key_file, O_RDONLY)) < 0)
+    {
+        dbg_perror("verifying failed: open");
+        goto verify_cleanup;
+    }
+    if ((e_ro = elf_begin(fd, ELF_C_READ, NULL)) == NULL)
+    {
+        dbg_perror("verifying failed: elf_begin: %s", elf_errmsg(-1));
+        goto verify_cleanup;
+    }
+    if (elf_kind(e_ro) != ELF_K_ELF)
+    {
+        dbg_perror("verifying failed: not an ELF file");
+        goto verify_cleanup;
+    }
+
+    // check signature section
+    Elf_Scn* sig_scn = find_section_by_name(e_ro, SIGNATURE_SECTION_NAME);
+    if (!sig_scn)
+    {
+        dbg_pinfo("verifying succeeded: no .signature section");
+        status_code = 61;
+        goto verify_cleanup;
+    }
+
+    GElf_Shdr shdr;
+    if (!gelf_getshdr(sig_scn, &shdr))
+    {
+        dbg_perror("verifying failed: gelf_getshdr: %s", elf_errmsg(-1));
+        goto verify_cleanup;
+    }
+
+    // verify signature length
+    if (shdr.sh_size != SIGNATURE_LEN)
+    {
+        dbg_perror("verifying succeeded: signature size mismatch "
+            "(found %zu, expected %d)", (size_t)shdr.sh_size, SIGNATURE_LEN);
+        status_code = 62;
+        goto verify_cleanup;
+    }
+
+    // copy signature payload into local buffer
+    unsigned char signature_buf[SIGNATURE_LEN];
+    if (pread(fd, signature_buf, SIGNATURE_LEN, shdr.sh_offset) != SIGNATURE_LEN)
+    {
+        dbg_perror("verifying failed: pread signature");
+        goto verify_cleanup;
+    }
+    dbg_pinfo("valid signature read");
+
+    // read the whole file into memory
+    off_t fsize = lseek(fd, 0, SEEK_END);
+    if (fsize < 0)
+    {
+        dbg_perror("verifying failed: lseek");
+        goto verify_cleanup;
+    }
+
+    file_img = malloc((size_t)fsize);
+    if (!file_img)
+    {
+        dbg_perror("verifying failed: img malloc");
+        goto verify_cleanup;
+    }
+
+    lseek(fd, 0, SEEK_SET);
+    if (read(fd, file_img, (size_t)fsize) != fsize)
+    {
+        dbg_perror("verifying failed: read file");
+        goto verify_cleanup;
+    }
+    dbg_pinfo("file image loaded");
+
+    // zero the signature payload *in memory* only
+    memset(file_img + shdr.sh_offset, 0, shdr.sh_size);
+    dbg_pinfo(".sig section zeroed in memory");
+
+    // verify the signature
+    result = do_verify(file_img, (size_t)fsize, verifying_key, signature_buf, SIGNATURE_LEN);
+
+    if (result == 1)
+    {
+        dbg_pinfo("verifying succeeded: signature is valid");
+        printf(MSG_OK);
+        status_code = 0;
+    }
+    else if (result == 0)
+    {
+        dbg_pinfo("verifying succeeded: signature is invalid");
+        printf(MSG_NOT_OK);
+        status_code = 1;
+    }
+    else
+    {
+        dbg_perror("verifying failed: do_verify");
+    }
+
+verify_cleanup:
+    if (e_ro)          elf_end(e_ro);
+    if (file_img)      free(file_img);
+    if (verifying_key) EVP_PKEY_free(verifying_key);
+    return status_code;
+}
+
+
 // signtool
 // CLI:
 // ./signtool sign -e <path to executable> -k <path to private_key.pem>
@@ -301,342 +779,28 @@ int main(int argc, char* argv[])
         goto err;
     }
 
-    int exit_code = -1;
+    int exit_code = 1;
     int tmp = 0;
 
     if (m == SIGN)
     {
-        Elf* e_out = NULL;
-
-        unsigned char* md = NULL;
-
-        EVP_PKEY* signing_key = NULL;
-        char* copy_file_name = NULL;
-
-        // sig calc
-        unsigned char* sig_buf = NULL;
-        size_t sig_buf_size = 0;
-
-        unsigned char* zero_buf = NULL;
-
-        exit_code = -10; // elf file sign general error
-
-        // create a copy of the file we are going to sign
-        // this is the file we will be signing
-        copy_file_name = calloc(1, strlen(arg_file) + strlen(SIGNATURE_POSTFIX) + 1);
-        copy_file_name = strcpy(copy_file_name, arg_file);
-        copy_file_name = strcat(copy_file_name, SIGNATURE_POSTFIX);
-
-        if ((copy_file(arg_file, copy_file_name) != 0))
+        tmp = create_signed_elf(arg_file, arg_key);
+        if (tmp != 0)
         {
-            dbg_perror("signing failed: copy_file failed");
-            goto sign_cleanup;
-        }
-
-        if ((fd = open(copy_file_name, O_RDWR, 0)) < 0)
-        {
-            dbg_perror("signing failed: open failed: %s", copy_file_name);
-            goto sign_cleanup;
-        }
-
-        e_out = elf_begin(fd, ELF_C_RDWR, NULL);
-
-
-        // read key
-        if ((tmp = read_key(arg_key, 1, &signing_key)) != 0)
-        {
-            dbg_perror("signing failed: read_key failed: code %d, reading %s", tmp, arg_key);
-            goto sign_cleanup;
-        }
-
-        // singing_key is initialized with the private key here
-
-        // now we need to start actually signing the file
-        // first check if the section already exists
-        Elf_Scn* sig_scn;
-        size_t sig_size = SIGNATURE_LEN;
-        sig_scn = find_section_by_name(e_out, SIGNATURE_SECTION_NAME);
-
-        if (sig_scn == NULL)
-        {
-            sig_scn = elf_newscn(e_out);
-            if (sig_scn == NULL)
-            {
-                dbg_perror("signing failed: elf_newscn failed: %s", elf_errmsg(-1));
-                goto sign_cleanup;
-            }
-        }
-
-        // empty buf that will be used to create/populate the section
-        zero_buf = calloc(1, sig_size);
-        if (zero_buf == NULL)
-        {
-            dbg_perror("signing failed: calloc for zero buf failed");
-            goto sign_cleanup;
-        }
-
-        Elf_Data* sig_data = elf_getdata(sig_scn, NULL);
-
-        if (sig_data == NULL || sig_data->d_size == 0)
-        {
-            if (sig_data == NULL)
-            {
-                // we created/loaded an in memory shdr, its data is non existent
-                sig_data = elf_newdata(sig_scn);
-                if (sig_data == NULL)
-                {
-                    dbg_perror("signing failed: elf_newdata failed: %s", elf_errmsg(-1));
-                    goto sign_cleanup;
-                }
-            }
-
-            // section loaded/created. anyways set its parameters to what we need
-            sig_data->d_align = 1;              // alignment is 1 (we don't care)
-            sig_data->d_buf = zero_buf;         // data buffer
-            sig_data->d_size = sig_size;        // reserve space for signature
-            sig_data->d_type = ELF_T_BYTE;      // type is unsigned char
-            sig_data->d_version = EV_CURRENT;   // version is current
-        }
-
-        // update the shstrtab
-        size_t shstrtab_index = 0;
-
-        // get the section header string table index
-        if (elf_getshdrstrndx(e_out, &shstrtab_index) != 0)
-        {
-            dbg_perror("signing failed: elf_getshstrndx failed: %s", elf_errmsg(-1));
-            goto sign_cleanup;
-        }
-
-        // get the section header string table
-        Elf_Scn* shstrtab_scn = elf_getscn(e_out, shstrtab_index);
-        if (shstrtab_scn == NULL)
-        {
-            dbg_perror("signing failed: elf_getscn failed: %s", elf_errmsg(-1));
-            goto sign_cleanup;
-        }
-
-        // get the section header string table data
-        Elf_Data* shstrtab_data = elf_getdata(shstrtab_scn, NULL);
-        if (shstrtab_data == NULL)
-        {
-            dbg_perror("signing failed: elf_getdata failed: %s", elf_errmsg(-1));
-            goto sign_cleanup;
-        }
-
-        // get the size of the section header string table
-        size_t unsigned_shstrtab_size = shstrtab_data->d_size;
-
-        // set the name of the section header string table
-        const char* signature_scn_name = SIGNATURE_SECTION_NAME;
-        size_t signature_scn_name_len = strlen(signature_scn_name) + 1;
-
-        Elf_Data* signed_shstrtab_data = elf_newdata(shstrtab_scn);
-        if (signed_shstrtab_data == NULL)
-        {
-            dbg_perror("signing failed: elf_newdata failed: %s", elf_errmsg(-1));
-            goto sign_cleanup;
-        }
-
-        // update the section header string table
-        signed_shstrtab_data->d_align = 1;
-        signed_shstrtab_data->d_buf = (void*)signature_scn_name;
-        signed_shstrtab_data->d_size = signature_scn_name_len;
-        signed_shstrtab_data->d_type = ELF_T_BYTE;
-        signed_shstrtab_data->d_version = EV_CURRENT;
-
-        // update the section header string table size
-        GElf_Shdr shdr;
-        gelf_getshdr(sig_scn, &shdr);
-        shdr.sh_name = unsigned_shstrtab_size; // offset in the shstrtab = size of the original shstrtab
-        shdr.sh_type = SHT_PROGBITS;
-        shdr.sh_flags = 0; // no need to load this section when runnning so we set it to 0
-        shdr.sh_addralign = 1;
-        gelf_update_shdr(sig_scn, &shdr);
-
-        // sync the updated elf file with disk
-        if (elf_update(e_out, ELF_C_WRITE) < 0)
-        {
-            dbg_perror("signing failed: elf_update failed: %s", elf_errmsg(-1));
-            goto sign_cleanup;
-        }
-
-        dbg_pinfo("-signed executable file created and .sig section added");
-
-        // elf file modified, signature section+data allocated
-        // still general error
-        exit_code = -20;
-
-        // read the executable file again
-        long mdlen = read_file_fd(fd, &md);
-        if (mdlen < 0)
-        {
-            dbg_perror("signing failed: read_file failed: %s", arg_file);
-            goto sign_cleanup;
-        }
-
-        dbg_pinfo("executable file re-read");
-
-        // calculate signature
-        // do_sign will allocate sig_buf and set sig_buf_size to the size of the signature
-        if (do_sign(md, (size_t)mdlen, signing_key, &sig_buf, &sig_buf_size) != 0)
-        {
-            dbg_perror("signing failed: do_sign failed");
-            goto sign_cleanup;
-        }
-
-        dbg_pinfo("signature calculated");
-
-        // assert that the signature is the same size as the section
-        if (sig_buf_size != SIGNATURE_LEN)
-        {
-            dbg_perror("signing failed: signature size is not %d", SIGNATURE_LEN);
-            goto sign_cleanup;
-        }
-
-        // write signature to .signature section
-        // note: size of the signature is *unmodified*
-        sig_data->d_buf = sig_buf; // signature buffer
-
-        // update the elf file with the signature
-        if (elf_update(e_out, ELF_C_WRITE) < 0)
-        {
-            dbg_perror("signing failed: elf_update failed: %s", elf_errmsg(-1));
-            goto sign_cleanup;
-        }
-
-        dbg_pinfo("signature written to .signature section");
-        dbg_pinfo("signing succeeded");
-
-    sign_cleanup:
-        if (signing_key) EVP_PKEY_free(signing_key);
-        if (copy_file_name) free(copy_file_name);
-        if (sig_buf) OPENSSL_free(sig_buf);
-        if (zero_buf) free(zero_buf);
-        if (e_out) elf_end(e_out);
-        if (md) free(md);
-        goto err;
-    }
-    else if (m == VERIFY)
-    {
-        EVP_PKEY* verifying_key = NULL;
-        Elf* e_ro = NULL;
-        unsigned char* file_img = NULL;
-        int result = -1;
-        exit_code = -60;
-
-        // load public key
-        if (read_key(arg_key, 0, &verifying_key) != 0)
-        {
-            dbg_perror("verifying failed: read_key");
-            goto verify_cleanup;
-        }
-
-        // open executable read-only, map with libelf
-        if ((fd = open(arg_file, O_RDONLY)) < 0)
-        {
-            dbg_perror("verifying failed: open");
-            goto verify_cleanup;
-        }
-        if ((e_ro = elf_begin(fd, ELF_C_READ, NULL)) == NULL)
-        {
-            dbg_perror("verifying failed: elf_begin: %s", elf_errmsg(-1));
-            goto verify_cleanup;
-        }
-        if (elf_kind(e_ro) != ELF_K_ELF)
-        {
-            dbg_perror("verifying failed: not an ELF file");
-            goto verify_cleanup;
-        }
-
-        // check signature section
-        Elf_Scn* sig_scn = find_section_by_name(e_ro, SIGNATURE_SECTION_NAME);
-        if (!sig_scn)
-        {
-            dbg_pinfo("verifying succeeded: no .signature section");
-            printf(MSG_NOT_SIGNED);
+            dbg_perror("signing failed: create_signed_elf failed: code %d", tmp);
             exit_code = 1;
-            goto verify_cleanup;
-        }
-
-        GElf_Shdr shdr;
-        if (!gelf_getshdr(sig_scn, &shdr))
-        {
-            dbg_perror("verifying failed: gelf_getshdr: %s", elf_errmsg(-1));
-            goto verify_cleanup;
-        }
-
-        // verify signature length
-        if (shdr.sh_size != SIGNATURE_LEN)
-        {
-            dbg_perror("verifying failed: signature size mismatch "
-                "(found %zu, expected %d)", (size_t)shdr.sh_size, SIGNATURE_LEN);
-            printf(MSG_NOT_SIGNED);
-            exit_code = 1;
-            goto verify_cleanup;
-        }
-
-        // copy signature payload into local buffer
-        unsigned char signature_buf[SIGNATURE_LEN];
-        if (pread(fd, signature_buf, SIGNATURE_LEN, shdr.sh_offset) != SIGNATURE_LEN)
-        {
-            dbg_perror("verifying failed: pread signature");
-            goto verify_cleanup;
-        }
-        dbg_pinfo("valid signature read");
-
-        // read the whole file into memory
-        off_t fsize = lseek(fd, 0, SEEK_END);
-        if (fsize < 0)
-        {
-            dbg_perror("verifying failed: lseek");
-            goto verify_cleanup;
-        }
-
-        file_img = malloc((size_t)fsize);
-        if (!file_img)
-        {
-            dbg_perror("verifying failed: img malloc");
-            goto verify_cleanup;
-        }
-
-        lseek(fd, 0, SEEK_SET);
-        if (read(fd, file_img, (size_t)fsize) != fsize)
-        {
-            dbg_perror("verifying failed: read file");
-            goto verify_cleanup;
-        }
-        dbg_pinfo("file image loaded");
-
-        // zero the signature payload *in memory* only
-        memset(file_img + shdr.sh_offset, 0, shdr.sh_size);
-        dbg_pinfo(".sig section zeroed in memory");
-
-        // verify the signature
-        result = do_verify(file_img, (size_t)fsize, verifying_key, signature_buf, SIGNATURE_LEN);
-
-        if (result == 1)
-        {
-            dbg_pinfo("verifying succeeded: signature is valid");
-            printf(MSG_OK);
-            exit_code = 0;
-        }
-        else if (result == 0)
-        {
-            dbg_pinfo("verifying succeeded: signature is invalid");
-            printf(MSG_NOT_OK);
-            exit_code = 1;
+            goto err;
         }
         else
         {
-            dbg_perror("verifying failed: do_verify");
+            dbg_pinfo("signing succeeded");
+            printf(MSG_OK);
+            exit_code = 0;
         }
+    }
+    else if (m == VERIFY)
+    {
 
-    verify_cleanup:
-        if (e_ro)          elf_end(e_ro);
-        if (file_img)      free(file_img);
-        if (verifying_key) EVP_PKEY_free(verifying_key);
-        goto err;
     }
 
     exit_code = 0;

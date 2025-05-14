@@ -17,4 +17,11 @@ enum mode
     VERIFY = 1,
 };
 
+struct range
+{
+    off_t off;
+    size_t size;
+};
+
+
 #endif
