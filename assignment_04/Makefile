@@ -12,6 +12,7 @@ sign: signtool test_executable
 verify: signtool test_executable
 	echo "verifying test file"
 	./signtool verify -e test_executable-signed -k public_key.pem
+	./signtool verify -e test_executable -k public_key.pem
 
 clean:
 	rm -f signtool test_executable test_executable-signed
