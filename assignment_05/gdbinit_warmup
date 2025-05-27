@@ -1,0 +1,2 @@
+set debuginfod enabled off
+b *0x40107f
