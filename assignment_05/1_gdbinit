@@ -1,0 +1,3 @@
+set debuginfod enabled off
+b *0x401563
+run < dbg.exploit
