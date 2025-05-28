@@ -22,6 +22,6 @@ fi
 mkdir -p "$(dirname "$OUTFILE")"
 
 # Generate dump
-objdump -M intel -D -R -f -C -r -s -S -x "$BINARY" > "$OUTFILE"
+objdump -M intel -D --visualize-jumps -f -C -r -s -S -x "$BINARY" > "$OUTFILE"
 
 echo "[+] Dump saved to $OUTFILE"

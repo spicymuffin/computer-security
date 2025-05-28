@@ -1,0 +1,3 @@
+set debuginfod enabled off
+b *0x402f1a
+run < 2.exploit
