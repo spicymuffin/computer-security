@@ -1,2 +1,7 @@
 embedding_layer.bin
 stories15M.bin
+stories42M.bin
+stories110M.bin
+leak-stories
+generated.out
+leaked.out

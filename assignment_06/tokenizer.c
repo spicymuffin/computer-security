@@ -66,5 +66,5 @@ void safe_printf(char *piece) {
             return; // bad byte, don't print it
         }
     }
-    printf("%s", piece);
+    fprintf(stdout, "%s", piece);
 }
