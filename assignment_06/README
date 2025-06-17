@@ -1,0 +1,10 @@
+Luigi Cussigh
+2023148006
+
+The main idea is to watch which page from the memory-mapped embedding_layer.bin file is accessed by the victim to figure out the next token
+My approach is optimized for speed. Instead of making thousands of slow mincore system calls to check each page individually, I make a single mincore call on the entire file
+This gets a snapshot of all 32,000 pages at once and is much faster, which helps keep up with the server's token generation speed
+The main loop works by getting this cache snapshot, finding the one active page, printing its corresponding token, and then immediately evicting just that single page with madvise
+This resets the state for that token so it can be detected again later
+To make it more reliable, the program first waits for the llama2-server to start and map the embedding file before the main attack loop begins
+The recovered token IDs are then converted to words using the provided tokenizer code

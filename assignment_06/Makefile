@@ -1,5 +1,5 @@
 leak-stories: leak-stories.c
-	gcc -o leak-stories leak-stories.c tokenizer.c
+	gcc -o leak-stories leak-stories.c tokenizer.c -Ofast -Wno-unused-result
 run: leak-stories
 	./leak-stories
 trace: leak-stories
